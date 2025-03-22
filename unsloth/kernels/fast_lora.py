@@ -588,6 +588,7 @@ def fast_lora_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
                     W = self.base_layer.weight
                     return LoRA_W.apply(x, W, QUANT_STATE(W), lora_A, lora_B, scaling)
                 else:
+                    print("Computing DoRA via fastpath")
                     lora_A = self.lora_A[active_adapter].weight
                     lora_B = self.lora_B[active_adapter].weight
                     scaling = self.scaling[active_adapter]
