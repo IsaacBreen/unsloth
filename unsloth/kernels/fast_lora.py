@@ -452,6 +452,103 @@ class LoRA_W(torch.autograd.Function):
 pass
 
 
+class DoRA_W(torch.autograd.Function):
+    """
+    ### DoRA weights
+    W' = m * (W + A @ B * S) / ||W + A @ B * S||_2
+    where W is the base weight, A and B are LoRA matrices, S is the scaling factor,
+    m is the magnitude vector, and ||.||_2 is the column-wise L2 norm.
+
+    ### Forward computation
+    - U = W + A @ B * S
+    - norm = ||U||_2 along columns
+    - new_weight = m * (U / norm)
+    - Output = X @ new_weight.T (since nn.Linear uses X @ W.T)
+
+    ### Backpropagation
+    - Computes gradients for X, A, B, and m using chain rule.
+    """
+    @staticmethod
+    @torch_amp_custom_fwd
+    def forward(ctx, X : torch.Tensor, W, W_quant, A, B, S, m):
+        dtype = X.dtype
+
+        # Compute delta_W = (A @ B) * S  # shape (in_features, out_features)
+        delta_W = (A @ B) * S
+
+        # Dequantize W if necessary
+        W_dequant = fast_dequantize(W, W_quant)  # shape (out_features, in_features)
+
+        # Compute U = W_dequant + delta_W.T
+        U = W_dequant + delta_W.t()  # shape (out_features, in_features)
+
+        # Compute norm = U.norm(p=2, dim=0, keepdim=True)
+        norm = U.norm(p=2, dim=0, keepdim=True)  # shape (1, in_features)
+
+        # Compute scale = m / norm
+        scale = m / norm  # shape (1, in_features)
+
+        # Compute scaled_X = X * scale
+        scaled_X = X * scale  # shape (batch, in_features)
+
+        # Compute output = scaled_X @ U.T
+        output = scaled_X @ U.t()  # shape (batch, out_features)
+
+        # Save for backward
+        ctx.save_for_backward(A, B, S, m, U, norm, scale, X)
+        ctx.W_quant = W_quant
+
+        return output
+
+    @staticmethod
+    @torch_amp_custom_bwd
+    def backward(ctx, dY : torch.Tensor):
+        A, B, S, m, U, norm, scale, X = ctx.saved_tensors
+        W_quant = ctx.W_quant
+
+        batch, seq_len, _ = X.shape
+        dY = dY.reshape(-1, dY.shape[-1])  # shape (batch * seq_len, out_features)
+        X = X.reshape(-1, X.shape[-1])    # shape (batch * seq_len, in_features)
+        dtype = X.dtype
+
+        # Recompute scaled_X if needed
+        scaled_X = X * scale
+
+        # Compute dU.T = scaled_X.T @ dY
+        dU_T = scaled_X.t() @ dY  # shape (in_features, out_features)
+
+        # Compute dscaled_X = dY @ U
+        dscaled_X = dY @ U  # shape (batch * seq_len, in_features)
+
+        # Compute dX = dscaled_X * scale
+        dX = dscaled_X * scale  # shape (batch * seq_len, in_features)
+
+        # Compute dscale = (dscaled_X * X).sum(dim=0, keepdim=True)
+        dscale = (dscaled_X * X).sum(dim=0, keepdim=True)  # shape (1, in_features)
+
+        # Compute dm = dscale / norm
+        dm = dscale / norm  # shape (1, in_features)
+
+        # Compute dnorm = - dscale * (m / norm**2)
+        dnorm = - dscale * (m / norm**2)  # shape (1, in_features)
+
+        # Compute dU = dU_T.T + (U / norm) * dnorm
+        dU = dU_T.t() + (U / norm) * dnorm  # shape (out_features, in_features)
+
+        # Compute dAB = dU.T / S
+        dAB = dU.t() / S  # shape (in_features, out_features)
+
+        # Compute dA = dAB @ B.T
+        dA = dAB @ B.t()  # shape (in_features, r)
+
+        # Compute dB = A.T @ dAB
+        dB = A.t() @ dAB  # shape (r, out_features)
+
+        # Return gradients matching input arguments
+        return dX.view(batch, seq_len, -1), None, None, dA, dB, None, dm
+pass
+
+
 def apply_lora_o(self, X):
     OW, OW_quant, OA, OB, OS = get_lora_parameters(self.o_proj)
     O = LoRA_W.apply(X, OW, OW_quant, OA, OB, OS)
@@ -491,10 +588,12 @@ def fast_lora_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
                     W = self.base_layer.weight
                     return LoRA_W.apply(x, W, QUANT_STATE(W), lora_A, lora_B, scaling)
                 else:
-                    # TODO: implement this
-                    pass
-            pass
-        pass
+                    lora_A = self.lora_A[active_adapter].weight
+                    lora_B = self.lora_B[active_adapter].weight
+                    scaling = self.scaling[active_adapter]
+                    W = self.base_layer.weight
+                    m = self.lora_magnitude_vector[active_adapter].weight
+                    return DoRA_W.apply(x, W, QUANT_STATE(W), lora_A, lora_B, scaling, m)
 
         result = self.base_layer(x, *args, **kwargs)
         # As per Tim Dettmers, for 4bit, we need to defensively clone here.
