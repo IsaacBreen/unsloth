@@ -483,12 +483,16 @@ def fast_lora_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
             if active_adapter not in self.lora_A.keys(): return self.base_layer(x, *args, **kwargs)
 
             dropout = self.lora_dropout[active_adapter]
-            if isinstance(dropout, IDENTITY_DROPOUT) and not self.use_dora[active_adapter]:
-                lora_A = self.lora_A[active_adapter].weight
-                lora_B = self.lora_B[active_adapter].weight
-                scaling = self.scaling[active_adapter]
-                W = self.base_layer.weight
-                return LoRA_W.apply(x, W, QUANT_STATE(W), lora_A, lora_B, scaling)
+            if isinstance(dropout, IDENTITY_DROPOUT):
+                if not self.use_dora[active_adapter]:
+                    lora_A = self.lora_A[active_adapter].weight
+                    lora_B = self.lora_B[active_adapter].weight
+                    scaling = self.scaling[active_adapter]
+                    W = self.base_layer.weight
+                    return LoRA_W.apply(x, W, QUANT_STATE(W), lora_A, lora_B, scaling)
+                else:
+                    # TODO: implement this
+                    pass
             pass
         pass
 
