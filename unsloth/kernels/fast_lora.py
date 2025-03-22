@@ -582,6 +582,7 @@ def fast_lora_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
             dropout = self.lora_dropout[active_adapter]
             if isinstance(dropout, IDENTITY_DROPOUT):
                 if not self.use_dora[active_adapter]:
+                    print("Computing LoRA via fastpath")
                     lora_A = self.lora_A[active_adapter].weight
                     lora_B = self.lora_B[active_adapter].weight
                     scaling = self.scaling[active_adapter]
@@ -595,6 +596,8 @@ def fast_lora_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
                     W = self.base_layer.weight
                     m = self.lora_magnitude_vector[active_adapter].weight
                     return DoRA_W.apply(x, W, QUANT_STATE(W), lora_A, lora_B, scaling, m)
+
+        print("Using slowpath")
 
         result = self.base_layer(x, *args, **kwargs)
         # As per Tim Dettmers, for 4bit, we need to defensively clone here.
